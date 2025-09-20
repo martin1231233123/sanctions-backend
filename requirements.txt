@@ -3,4 +3,6 @@ requests
 pandas
 openpyxl
 lxml
+uvicorn
+fastapi
 
