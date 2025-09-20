@@ -2,10 +2,15 @@ from fastapi import FastAPI, Query
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 import math
+import os
 
 app = FastAPI(title="Sanctions Lookup API", version="2.2")
 
-MONGO_URI = "mongodb://admin:admin@localhost:27017/?authSource=admin"
+# --- Leer URI de MongoDB desde variable de entorno ---
+MONGO_URI = os.getenv("MONGO_URI")
+
+if not MONGO_URI:
+    raise ValueError("❌ No se encontró la variable de entorno MONGO_URI. Configúrala en Render.")
 
 collections = [
     "ofac_list",
