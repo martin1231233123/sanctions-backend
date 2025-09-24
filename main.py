@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
+from fastapi.responses import JSONResponse
 import math
 import os
 
-app = FastAPI(title="Sanctions Lookup API", version="2.3")
+app = FastAPI(title="Sanctions Lookup API", version="3.0")
 
 # --- Leer URI de MongoDB desde variable de entorno ---
 MONGO_URI = os.getenv("MONGO_URI")
@@ -51,108 +52,68 @@ except ServerSelectionTimeoutError as err:
     print("❌ No se pudo conectar a MongoDB:", err)
     db = None
 
+
 @app.get("/")
 def read_root():
     return {"message": "POC FastAPI + MongoDB OK 🚀"}
 
+
 # ---------------------------------------------------------
-# 🔎 1. Buscar persona o empresa en TODAS las listas
+# 🔎 Buscar persona por nombre y apellido en TODAS las listas
 # ---------------------------------------------------------
-@app.get("/search_all_lists/")
-def search_all_lists(
-    person: str | None = Query(None, description="Nombre de la persona a buscar"),
-    company: str | None = Query(None, description="Nombre de la empresa a buscar")
+@app.get("/search_person/")
+def search_person(
+    first_name: str = Query(..., description="Nombre a buscar"),
+    surname: str = Query(..., description="Apellido a buscar")
 ):
     """
-    Recorre todas las listas y devuelve coincidencias para
-    - persona (campo 'name')
-    - empresa (campo 'company' o similar)
+    Busca coincidencias de nombre y apellido en todas las listas MongoDB.
+    Devuelve HTTP 200 si hay resultados, o HTTP 404 si no se encuentra nada.
     """
     if db is None:
-        return {"error": "MongoDB no está disponible"}
-
-    if not person and not company:
-        return {"error": "Debes especificar al menos 'person' o 'company'"}
+        raise HTTPException(status_code=503, detail="MongoDB no está disponible")
 
     results = {}
 
     for coll in collections:
-        query = {"$or": []}
-        if person:
-            query["$or"].append({"name": {"$regex": person, "$options": "i"}})
-        if company:
-            # suponiendo que la colección tenga un campo 'company' o similar
-            query["$or"].append({"company": {"$regex": company, "$options": "i"}})
-
-        if not query["$or"]:
-            continue
-
         try:
+            # Buscamos coincidencias aproximadas (case-insensitive)
+            query = {
+                "$and": [
+                    {"name": {"$regex": first_name, "$options": "i"}},
+                    {"name": {"$regex": surname, "$options": "i"}}
+                ]
+            }
             cursor = db[coll].find(query, {"_id": 0})
             docs = [clean_doc(d) for d in cursor]
             if docs:
                 results[coll] = docs
         except Exception as e:
             print(f"⚠️ Error buscando en {coll}: {e}")
-            results[coll] = []
 
-    return {
-        "person": person,
-        "company": company,
-        "results": results,
-        "message": None if results else "No se encontraron coincidencias"
+    if not results:
+        # 🔴 Si NO hay resultados, devolvemos 404 con mensaje
+        raise HTTPException(status_code=404, detail="No se encontraron coincidencias")
+
+    # ✅ Si hay resultados, devolvemos 200 con estructura estilo Factiva
+    response = {
+        "data": {
+            "attributes": {
+                "basic": {
+                    "type": "Person",
+                    "name_details": {
+                        "primary_name": {
+                            "first_name": first_name,
+                            "surname": surname
+                        }
+                    }
+                },
+                "watchlist": {
+                    "matches": results  # Aquí se listan todas las coincidencias por colección
+                }
+            }
+        }
     }
 
-# ---------------------------------------------------------
-# 🏢 2. Buscar a qué persona(s) pertenece una empresa
-# ---------------------------------------------------------
-@app.get("/company_owners/")
-def company_owners(
-    company: str = Query(..., description="Nombre de la empresa para encontrar sus dueños")
-):
-    """
-    Busca el nombre de la empresa en todas las listas
-    y devuelve los registros que incluyan persona(s) vinculadas.
-    """
-    if db is None:
-        return {"error": "MongoDB no está disponible"}
-
-    results = {}
-
-    for coll in collections:
-        try:
-            # Buscamos coincidencias de empresa en campo 'company'
-            cursor = db[coll].find({"company": {"$regex": company, "$options": "i"}}, {"_id": 0})
-            docs = [clean_doc(d) for d in cursor]
-            if docs:
-                results[coll] = docs
-        except Exception as e:
-            print(f"⚠️ Error buscando en {coll}: {e}")
-            results[coll] = []
-
-    return {
-        "company": company,
-        "results": results,
-        "message": None if results else "No se encontraron coincidencias"
-    }
-
-# ---------------------------------------------------------
-# ✅ Endpoints originales (se mantienen para compatibilidad)
-# ---------------------------------------------------------
-@app.get("/search/")
-def search_sanctioned(name: str = Query(..., description="Nombre o empresa a buscar")):
-    if db is None:
-        return {"error": "MongoDB no está disponible"}
-    results = {}
-    search_filter = {"$text": {"$search": name}}
-    for coll in collections:
-        try:
-            cursor = db[coll].find(search_filter, {"_id": 0})
-            docs = [clean_doc(d) for d in cursor]
-            results[coll] = docs
-        except Exception as e:
-            print(f"⚠️ Error en {coll}: {e}")
-            results[coll] = []
-    return {"query": name, "results": results,
-            "message": None if any(results.values()) else "No se encontraron coincidencias"}
+    return JSONResponse(status_code=200, content=response)
 
