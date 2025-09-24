@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 import math
 import os
 
-app = FastAPI(title="Sanctions Lookup API", version="3.0")
+app = FastAPI(title="Sanctions Lookup API", version="3.1")
 
 # --- Leer URI de MongoDB desde variable de entorno ---
 MONGO_URI = os.getenv("MONGO_URI")
@@ -42,8 +42,9 @@ try:
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     client.admin.command("ping")
     db = client["sanctions"]
-    print("✅ Conexión a MongoDB exitosa")
+    print("✅ Conexión a MongoDB Atlas exitosa")
 
+    # Crear índice de texto si no existe
     for coll in collections:
         db[coll].create_index([("name", "text")])
         print(f"📌 Índice de texto creado en {coll}")
@@ -68,7 +69,8 @@ def search_person(
 ):
     """
     Busca coincidencias por nombre O apellido en todas las listas MongoDB.
-    Devuelve HTTP 200 si hay resultados, o HTTP 404 si no se encuentra nada.
+    Devuelve HTTP 200 si hay resultados en al menos una lista, o HTTP 404 si no se encuentra nada.
+    Incluye TODAS las listas en la respuesta, incluso las que no tienen coincidencias.
     """
     if db is None:
         raise HTTPException(status_code=503, detail="MongoDB no está disponible")
@@ -79,11 +81,12 @@ def search_person(
             detail="Debes proporcionar al menos 'first_name' o 'surname'"
         )
 
-    results = {}
+    all_results = {}   # contendrá TODAS las listas, con coincidencias o vacías
+    total_matches = 0  # contador global de coincidencias
 
     for coll in collections:
         try:
-            # 🔎 Búsqueda flexible: coincidencia por nombre O apellido
+            # Construcción flexible: nombre O apellido (case-insensitive)
             or_conditions = []
             if first_name:
                 or_conditions.append({"name": {"$regex": first_name, "$options": "i"}})
@@ -93,15 +96,17 @@ def search_person(
             query = {"$or": or_conditions}
             cursor = db[coll].find(query, {"_id": 0})
             docs = [clean_doc(d) for d in cursor]
-            if docs:
-                results[coll] = docs
+
+            all_results[coll] = docs  # ✅ Guardar aunque esté vacío
+            total_matches += len(docs)
         except Exception as e:
             print(f"⚠️ Error buscando en {coll}: {e}")
+            all_results[coll] = []  # en caso de error, devolvemos vacío
 
-    if not results:
+    if total_matches == 0:
         raise HTTPException(status_code=404, detail="No se encontraron coincidencias")
 
-    # ✅ Estructura de respuesta estilo Factiva
+    # ✅ Respuesta estilo Factiva con TODAS las listas
     response = {
         "data": {
             "attributes": {
@@ -115,7 +120,11 @@ def search_person(
                     }
                 },
                 "watchlist": {
-                    "matches": results
+                    "matches_by_list": all_results,
+                    "summary": {
+                        "total_matches": total_matches,
+                        "lists_searched": collections
+                    }
                 }
             }
         }
