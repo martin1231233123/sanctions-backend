@@ -59,31 +59,38 @@ def read_root():
 
 
 # ---------------------------------------------------------
-# 🔎 Buscar persona por nombre y apellido en TODAS las listas
+# 🔎 Buscar persona por nombre O apellido en TODAS las listas
 # ---------------------------------------------------------
 @app.get("/search_person/")
 def search_person(
-    first_name: str = Query(..., description="Nombre a buscar"),
-    surname: str = Query(..., description="Apellido a buscar")
+    first_name: str = Query(None, description="Nombre a buscar (opcional)"),
+    surname: str = Query(None, description="Apellido a buscar (opcional)")
 ):
     """
-    Busca coincidencias de nombre y apellido en todas las listas MongoDB.
+    Busca coincidencias por nombre O apellido en todas las listas MongoDB.
     Devuelve HTTP 200 si hay resultados, o HTTP 404 si no se encuentra nada.
     """
     if db is None:
         raise HTTPException(status_code=503, detail="MongoDB no está disponible")
 
+    if not first_name and not surname:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes proporcionar al menos 'first_name' o 'surname'"
+        )
+
     results = {}
 
     for coll in collections:
         try:
-            # Buscamos coincidencias aproximadas (case-insensitive)
-            query = {
-                "$and": [
-                    {"name": {"$regex": first_name, "$options": "i"}},
-                    {"name": {"$regex": surname, "$options": "i"}}
-                ]
-            }
+            # 🔎 Búsqueda flexible: coincidencia por nombre O apellido
+            or_conditions = []
+            if first_name:
+                or_conditions.append({"name": {"$regex": first_name, "$options": "i"}})
+            if surname:
+                or_conditions.append({"name": {"$regex": surname, "$options": "i"}})
+
+            query = {"$or": or_conditions}
             cursor = db[coll].find(query, {"_id": 0})
             docs = [clean_doc(d) for d in cursor]
             if docs:
@@ -92,10 +99,9 @@ def search_person(
             print(f"⚠️ Error buscando en {coll}: {e}")
 
     if not results:
-        # 🔴 Si NO hay resultados, devolvemos 404 con mensaje
         raise HTTPException(status_code=404, detail="No se encontraron coincidencias")
 
-    # ✅ Si hay resultados, devolvemos 200 con estructura estilo Factiva
+    # ✅ Estructura de respuesta estilo Factiva
     response = {
         "data": {
             "attributes": {
@@ -109,7 +115,7 @@ def search_person(
                     }
                 },
                 "watchlist": {
-                    "matches": results  # Aquí se listan todas las coincidencias por colección
+                    "matches": results
                 }
             }
         }
